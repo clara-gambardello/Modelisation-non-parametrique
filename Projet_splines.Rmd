@@ -1,0 +1,727 @@
+---
+title: "Modélisation non paramétrique par des fonctions B-spline"
+author: "Cindy Lançon, Clara Gambardello, Karla Pem"
+date: "2025-11-27"
+output:
+  pdf_document: default
+---
+
+# Import des librairies
+
+```{r, message=FALSE, warning=FALSE}
+library(HRW)
+library(dplyr)
+library(mgcv)
+library(splines)
+library(knitr)
+library(ggplot2)
+
+data(WarsawApts)
+
+appart<-WarsawApts
+```
+
+Nous travaillons sur un jeu de données concernant les prix de ventes des
+appartements de Varsovie en Pologne. On cherche à prédire la variable
+"areaPerMzloty".
+
+Les différentes variables sont :
+
+-   areaPerMzloty : le prix au m².
+
+-   construction.date : date de construction de l'appartement.
+
+-   surface : surface de l'appartement.
+
+-   n.rooms : le nombre de chambre dans l'appartement.
+
+-   floors : l'étage de l'appartement.
+
+On se propose dans un premier temps de représenter le prix au mètre
+carré en fonction des autres variables quantitatives afin de visualiser
+si on observe ou non des relations linéaires ou non.
+
+### Partie 1 : Méthodes univariés
+
+On commence par tracer différents graphique pour choisir la variable que
+nous utiliserons dans nos modèles univariés, on trace également la
+droite de régression linéaire ainsi qu'une courbe d'ajustement
+non-linéaire.
+
+```{r, echo=FALSE}
+# Surface vs prix
+plot(WarsawApts$surface, WarsawApts$areaPerMzloty,
+     xlab = "Surface (m²)", ylab = "Prix par m² (Zloty)",
+     main = "Prix vs Surface", pch = 16, col = rgb(0,0,1,0.3))
+
+
+# Ajout d'une régression linéaire pour voir si c'est adéquat
+abline(lm(areaPerMzloty ~ surface, data = WarsawApts), col = "red", lwd = 2)
+# Ajout d'un loess pour voir la tendance non-linéaire
+lines(lowess(WarsawApts$surface, WarsawApts$areaPerMzloty), 
+      col = "green", lwd = 2)
+
+# Année de construction vs prix
+plot(WarsawApts$construction.date, WarsawApts$areaPerMzloty,
+     xlab = "Année de construction", ylab = "Prix par m² (Zloty)",
+     main = "Prix vs Année de construction", pch = 16, col = rgb(0,0,1,0.3))
+abline(lm(areaPerMzloty ~ construction.date, data = WarsawApts), 
+       col = "red", lwd = 2)
+lines(lowess(WarsawApts$construction.date, WarsawApts$areaPerMzloty), 
+      col = "green", lwd = 2)
+
+mod_lin_date <- lm(areaPerMzloty ~ construction.date, data = WarsawApts)
+
+# construction.date
+plot(fitted(mod_lin_date), residuals(mod_lin_date),
+     xlab = "Valeurs ajustées", ylab = "Résidus",
+     main = "Résidus - Modèle linéaire (Date)", pch = 16)
+abline(h = 0, col = "red", lwd = 2)
+```
+
+On observe les graphiques de surface et de construction date, ce que
+l'on peut constater c'est que l'on observe une tendance avec une légère
+forme de cloche sur la variable construction date alors que la surface
+apparait comme un nuage de point sans tendance particulière.
+
+Nous choisissons d'utiliser des méthodes non paramétriques, en effet
+nous constatons que le graphique des résidus du modèle linéaire montre
+une tendance en cloche, les résidus ne sont pas bien réparti, c'est une
+des façon de voir que le modèle linéaire n'est pas adapté.
+
+#### Modèle avec utilisation de B-splines
+
+Les B-splines constituent une méthode d’estimation non paramétrique
+efficace pour modéliser des relations non linéaires : elles permettent
+d’approximer une fonction inconnue par une combinaison linéaire de
+fonctions de base polynomiales définies par morceaux. Les paramètres
+modifiables sont le degré des polynômes et K nombre de noeud qui est lié
+au nombre de degrés.
+
+Les fonctions B-splines $B_1(\cdot),\ldots,B_q(\cdot)$ avec
+$dimension = nb \space noeuds + m= q = K + m$ , qui s’écrivent comme des
+combinaisons linéaires de polynômes tronqués de degré $m-1$ :
+
+$B_j = ( \xi_j - \xi_{j-m}) \displaystyle \sum_{l=0}^{m} \frac{(\xi_{j-l}-x)_+^{m-1}}{ \displaystyle \prod_{r=0, l\neq r}^m (\xi_{j-l}-\xi_{j-r})}$
+
+$B_j$ est non-nulle uniquement sur les intervalles entre les noeuds
+$\xi_{j-m},...,\xi_j$.
+
+Le modèle s'écrit alors :
+
+$y_i = \displaystyle \sum_{j=1}^q \beta_jB_j(x_i) + \epsilon_i$
+
+Nous commençons par estimer un modèle de régression non paramétrique
+utilisant des B-splines en choisissant de manière arbitraire le degré 2
+avec 8 degrés de liberté, le modèle est ajusté via la fonction lm() avec
+la base spline générée par bs() :
+
+```{r, include=FALSE}
+res.bs<-lm(areaPerMzloty~bs(construction.date, df=8,degree=2, intercept=TRUE)-1,data=appart)
+summary(res.bs)
+```
+
+```{r, echo=FALSE}
+ord <- order(appart$construction.date)
+
+plot(appart$construction.date,appart$areaPerMzloty,xlab="range",ylab="logratio",
+     main='B-spline pour df=8 and degre=2')
+lines(appart$construction.date[ord], predict(res.bs)[ord],type="l",col="red")
+```
+
+La représentation graphique de l’ajustement montre que les B-splines
+permettent de modéliser une tendance non linéaire cohérente entre
+l’année de construction et le prix au mètre carré.
+
+Afin de perfectionner ce modèle on cherche K le nombre de noeud par
+validation croisée, avec K dans l'interval [3, 20].
+
+```{r}
+K_grid <- seq(3, 20, by=1)
+```
+
+```{r}
+CV_spline <- function(K, data, nfold=5, degree=2) {
+
+  n <- nrow(data)
+  folds <- cut(seq(1,n), breaks=nfold, labels=FALSE)
+
+  err <- rep(0, nfold)
+
+  for (i in 1:nfold) {
+
+    test_id  <- which(folds == i)
+    train_id <- which(folds != i)
+
+    train <- data[train_id, ]
+    test  <- data[test_id, ]
+
+    mod <- lm(areaPerMzloty ~ bs(construction.date, df=K+degree+1, degree=degree, intercept=TRUE) - 1,
+              data=train)
+
+    ypred <- predict(mod, newdata=test)
+
+    err[i] <- mean((test$areaPerMzloty - ypred)^2)
+  }
+
+  return(mean(err))
+}
+```
+
+```{r}
+
+CV_errors_2 <- sapply(K_grid, CV_spline, data=appart, degree=2)
+best_K_2 <- K_grid[which.min(CV_errors_2)]
+
+paste("Erreur minimal", min(CV_errors_2))
+
+paste("K optimal : ",best_K_2)
+
+```
+
+On obtient l'erreur la plus faible pour K=4. On essaie également de
+changé le degré des polynômes, mais c'est avec des splines quadratiques
+que l'erreur est la plus faible.
+
+On représente l'erreur en fonction de K pour visualiser l'endroit ou
+l'erreur est minimale
+
+```{r, echo=FALSE}
+plot(K_grid, CV_errors_2, type="b", pch=19,
+     xlab="K", ylab="Erreur CV",
+     main="Validation croisée pour choisir K")
+abline(v=best_K_2, col="red", lty=2)
+```
+
+On retrouve bien K=4. On refait donc un modèle avec ce nouveau paramètre
+optimisé :
+
+```{r, echo=FALSE}
+res_final <- lm(areaPerMzloty ~ bs(construction.date, df=best_K_2+2+1, degree=2, intercept=TRUE) - 1,
+                data=appart)
+
+#summary(res_final)
+
+ord <- order(appart$construction.date)
+
+plot(appart$construction.date, appart$areaPerMzloty,
+     xlab="Année de construction", ylab="Prix au m²",
+     main=paste("B-spline avec K =", best_K_2),
+     pch=20)
+
+lines(appart$construction.date[ord],
+      predict(res_final)[ord],
+      col="red", lwd=2)
+```
+
+On obtient une courbe qui capture globalement bien la tendance des
+données même si elle ne parait pas forcément très régulière. On trace
+les résidus afin de vérifier leur distribution :
+
+```{r, echo=FALSE}
+plot(res_final$residuals, main="Résidus B-Splines", ylab="résidus")
+abline(h = 0, col="red")
+```
+
+En observant les résidus on constate qu'ils sont bien répartis autour de
+0. Le modèle est bien adapté.
+
+On calcule l'erreur quadratique moyenne ainsi que l'AIC.
+
+```{r, include=FALSE}
+MSE_bsplines <-mean((appart$areaPerMzloty - predict(res_final))^2) 
+paste ("MSE :", MSE_bsplines)
+
+AIC_bsplines <-AIC(res_final)
+paste("AIC : ", AIC_bsplines)
+
+```
+
+#### Comparaison des modèles
+
+```{r, include=FALSE}
+MSE_poly <- 338.7929
+AIC_poly <- 3555.276
+```
+
+```{r, include=FALSE}
+
+mse_psplines_b <- 338.68
+AIC_pspline_b <- 3521.28
+```
+
+```{r, include=FALSE}
+
+mse_penalise_tr <- 339.81
+AIC_pspline_tr <- 3521.33
+```
+
+On essaie également de pénalisé nos splines sur cette même base
+B-splines pour observer les résultats, en effet la pénalisation permet
+un meilleur lissage en gardant une bonne estimation.
+
+On a directement optimisé K par validation croisée à 5 couches, pour K
+entre 5 et 35 et on a obtenu une erreur minimale pour K=20 beaucoup plus
+important que sans pénalisation, en trançant le graphique on s'aperçoit
+que la courbe est beaucoup moins régulières pour une MSE et un AIC
+quasiment similaire a celui sans pénalisation avec moins de noeud. On
+choisit donc de conserver le modèle le plus simple
+
+On constate également que sur des splines pénalisés la base choisie,
+B-splines ou polynômes tronqués ne modifie pas de beaucoup la MSE et
+l'AIC.
+
+```{r, echo=FALSE}
+resultats <- data.frame(
+  Modele = c("Régression polynomiale", "P-spline (B-splines)", "P-spline (p. tronqués)", "B-spline"),
+  MSE = c(MSE_poly, mse_psplines_b, mse_penalise_tr, MSE_bsplines),
+  AIC = c(AIC_poly, AIC_pspline_b, AIC_pspline_tr, AIC_bsplines)
+)
+
+
+kable(resultats, 
+      digits = 1,
+      col.names = c("Modèle", "MSE", "AIC"),
+      caption = "Comparaison des performances des modèles univariés")
+```
+
+### Partie 2 Méthodes multivariés
+
+On passe maintenant aux modèles multivariés, en optimisant k (dimension
+de la base) par validation croisée. Le paramètre de lissage $\lambda$
+(sp dans s()) est optimisé directement dans la fonction gam() avec la
+validation croisée généralisée.
+
+On analyse l'effet de chaque prédicteur sur la variable a prédire, on
+s'apercoit que pour les variable nombre de pièces et étage, la relation
+est constante. Après des essais de modèles semi-paramétriques linéaire
+en ces deux variables et non linéaire pour les autres, on s'aperçoit que
+ce ne sont pas les modèles avec les plus faibles MSE ou AIC on se
+concentre donc sur un modèle avec surface et date de construction.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+mod1 <- gam(areaPerMzloty ~ s(construction.date, bs="bs") + s(surface, bs="bs") + s(floor, bs="bs")+s(n.rooms, bs="bs"), data = appart)
+
+
+par(mfrow=c(2,2),cex.main = 1.8, col.main = "navy",
+cex.lab = 1,mai = c(0.7,0.68,0.1,0.05))
+plot(mod1, select = 1,shade = TRUE,bty = "l", xlab = "surface", shade.col = "palegreen",rug = FALSE, ylab="Effet sur le prix au m²")
+rug(appart$surface,col="dodgerblue")
+
+plot(mod1, select = 2,shade = TRUE,bty = "l", xlab = "construction.date", shade.col="palegreen", rug=FALSE, ylab="Effet sur le prix au m²")
+rug(appart$construction.date,col="dodgerblue")
+
+plot(mod1, select = 3,shade = TRUE,bty = "l", xlab = "floor",shade.col="palegreen", rug=FALSE, ylab="Effet sur le prix au m²")
+rug(appart$floor,col="dodgerblue")
+
+plot(mod1, select = 4,shade = TRUE,bty = "l", xlab = "n.rooms",shade.col="palegreen", rug=FALSE, ylab="Effet sur le prix au m²")
+rug(appart$n.rooms,col="dodgerblue")
+```
+
+Nous réalisons un modèle avec P-splines avec paramètre bs par défaut de
+R qui correspond aux "Thin plate regression splines", on effectue une
+validation croisée à 5 couches pour choisir le paramètre k, la dimension
+de la base.
+
+```{r}
+cv_k_pspline_multi_r <- function(K, data, n_folds=5) {
+  n <- nrow(data)
+  folds <- cut(seq(1,n),breaks=n_folds, labels = FALSE)
+  mse_folds <- numeric(n_folds)
+  for (i in 1:n_folds) {
+    test_idx <- which(folds == i)
+    train_data <- data[-test_idx, ]
+    test_data <- data[test_idx, ]
+    
+    #Modèle
+    mod <- gam(areaPerMzloty ~ s(construction.date, k=K) + s(surface, k=K), data = train_data)
+
+    pred <- predict(mod, newdata = test_data)
+    mse_folds[i] <- mean((test_data$areaPerMzloty - pred)^2)
+  }
+  return(mean(mse_folds))
+}
+
+
+#Grille de K à tester
+K_test <- seq(5,35, by=1)
+mse_cv_multi <- sapply(K_test, cv_k_pspline_multi_r, data=WarsawApts, n_folds=5)
+
+
+res_cv_pen_multi <- data.frame(
+  K = K_test,
+  mse_cv_multi = round(mse_cv_multi,3)
+)
+
+best_K_multi_p_r<-K_test[ which.min(mse_cv_multi)]
+
+plot(K_test, mse_cv_multi, type="b", col="red",
+     xlab = "k",
+     ylab = "MSE (validation croisée)",
+     main= "Choix de k par CV")
+abline( v=best_K_multi_p_r, col="purple3")
+
+```
+
+On obtient un k optimal égal à 13, on utilise ce paramètre dans notre
+modèle dont on affiche le résumé :
+
+```{r, echo=FALSE}
+mod_best_p_r <- gam(areaPerMzloty ~ s(construction.date, k=best_K_multi_p_r) + s(surface, k=best_K_multi_p_r), data = appart)
+summary(mod_best_p_r)
+
+MSE_ps_d_multi <- mean((appart$areaPerMzloty - predict(mod_best_p_r))^2)
+AIC_ps_d_multi <- AIC(mod_best_p_r)
+```
+
+On trace les résidus pour vérifier leur distribution :
+
+```{r, echo=FALSE}
+plot(mod_best_p_r$residuals, main="Résidus modèle multivariés", ylab="résidus")
+abline(h = 0, col="red")
+```
+
+On retrouve des résidus équitablement répartis autour de 0, ce modèle
+est bien adapté. Le modèle met en évidence un effet significatif de la
+date de construction et de la surface sur le prix au m² (p \< 0,001 pour
+les deux). Le modèle explique environ 44 % de la déviance.
+
+#### Comparaison des modèles
+
+En essayant avec d'autres modèles nous obtenons des MSE et des AIC
+généralement plus élevés :
+
+```{r, include=FALSE}
+MSE_poly_mult <-315.417
+AIC_poly_mult <- 3530.035
+```
+
+```{r, include=FALSE}
+MSE_bsplines_multi1 <-287.1529
+aic_bsplines_multi1 <- 3507.638
+```
+
+```{r, include=FALSE}
+MSE_ps_bs_multi <- 273.49
+AIC_ps_bs_multi <- 3500.23
+```
+
+```{r, include=FALSE}
+MSE_ps_ps_multi <- 273.10
+AIC_ps_ps_multi <- 3499.83
+```
+
+```{r, echo=FALSE}
+resultats <- data.frame(
+  Modele = c("Régression polynomiale", "B-splines", "P-spline (B-spline)", "P-spline(p.tronqués)", "P-spline (par défaut)"),
+  MSE = c(MSE_poly_mult, MSE_bsplines_multi1, MSE_ps_bs_multi, MSE_ps_ps_multi, MSE_ps_d_multi),
+  AIC = c(AIC_poly_mult, aic_bsplines_multi1, AIC_ps_bs_multi, AIC_ps_ps_multi, AIC_ps_d_multi)
+)
+
+
+kable(resultats, 
+      digits = 1,
+      col.names = c("Modèle", "MSE", "AIC"),
+      caption = "Comparaison des performances des modèles multivariés")
+```
+
+Le modèle final est donc :
+
+$areaPerMzloty_i = \beta_0 + f_1(construction.date_i) + f_2(surface_i) + \epsilon_i$
+
+où $f_1$ et $f_2$ sont des fonctions (radiales) estimées dans une base
+de thin plate regression splines (tp : splines de plaque mince), qui
+utilise une pénalité sur les dérivées.
+
+### Partie 3 Méthode avec une variable qualitative et une variable quantitative
+
+Le jeu de données contient une variable facteur qui peut être utilisée
+dans le modèle : le district prenant comme valeurs Mokotow,
+Srodimiescie, Wola, Solibroz.
+
+On peut se poser la question : l'effet de l'année de construction est-il
+le même dans tous les districts ?
+
+```{r, echo=FALSE}
+WarsawApts$district <- as.factor(WarsawApts$district)
+
+mod_interaction <- gam(
+  areaPerMzloty ~ s(construction.date, by = district, bs = "bs", k = 15) + district,
+  data = WarsawApts
+)
+
+par(mfrow = c(2, 2), mar = c(4, 4, 2, 1))
+#couleurs
+couleurs <- c("Mokotow" = "#E41A1C", 
+              "Srodmiescie" = "#377EB8", 
+              "Wola" = "#4DAF4A", 
+              "Zoliborz" = "#984EA3")
+
+# Créer des données de prédiction
+newdata_interaction <- expand.grid(
+  construction.date = seq(min(WarsawApts$construction.date), 
+                          max(WarsawApts$construction.date), 
+                          length = 200),
+  district = levels(WarsawApts$district)
+)
+
+pred_interaction <- predict(mod_interaction, newdata = newdata_interaction)
+
+
+
+for (dist in levels(WarsawApts$district)) {
+  #Filtrer les données par district
+  data_dist <- WarsawApts[WarsawApts$district == dist, ]
+  
+  #Nuage de points 
+  plot(areaPerMzloty ~ construction.date, 
+       data = data_dist,
+       col = couleurs[dist],
+       pch = 16,
+       main = paste("District:", dist),
+       xlab = "Année de construction",
+       ylab = "Prix par m²",
+       ylim = range(WarsawApts$areaPerMzloty))
+  
+  #Courbe
+  idx <- newdata_interaction$district==dist
+  lines(newdata_interaction$construction.date[idx], 
+        pred_interaction[idx], 
+        col = couleurs[dist], 
+        lwd = 3)
+}
+
+```
+
+On observe que les courbes montrent des tendances différentes selon le
+district. L'effet de l'année de construction varie selon le quartier.
+Nous utilisons donc un modèle avec interaction (by= district) permettant
+d'estimer une courbe spécifique pour chaque quartier.
+
+#### Choix de la base :
+
+Nous avons testé différentes bases de splines : B-spline (bs = "bs),
+P-spline avec pénalité sur les différences (bs="ps") et thin plate
+regression spline (par défaut).
+
+Les base "ps", avec une pénalité sur la différence, obtient les
+meilleurs résultats.
+
+Nous avons construit des modèles emboîtés de complexité croissante afin
+d'identifer le meilleur modèle.
+
+-   Modèle 1 : Interaction district x année de construction
+
+-   Modèle 2 : Modèle 1 et ajout de la variable surface.
+
+-   Modèle 3 : Modèle 2 et ajout de l'étage.
+
+-   Modèle 4 : Modèle 2 et ajout du nombre de pièces.
+
+Pour définir le choix de la dimension de la base (k), nous avons décidé
+d'utiliser la règle de Ruppert et al. (2002), qui est la suivante :
+
+$$
+K = min(0.25 \times nombres \space de \space valeurs \space unique \space x_i, 35)
+$$
+
+```{r, message=FALSE, warning=FALSE}
+
+K_constr <- min(0.25 * length(unique(WarsawApts$construction.date)), 35)
+K_surface <- min(0.25 * length(unique(WarsawApts$surface)), 35)
+K_floor <- min(0.25 * length(unique(WarsawApts$floor)), 35)
+K_rooms <- min(0.25 * length(unique(WarsawApts$n.rooms)), 35)
+
+degree <- 3
+k_constr <- K_constr + degree + 1
+k_surface <- K_surface + degree + 1
+k_floor <- K_floor + degree + 1
+k_rooms <- K_rooms + degree + 1
+
+# k = K + degree +1
+# K = k - degree -1
+
+# Modèle 1 : district additif (effet constant)
+mod1_b <- gam(areaPerMzloty~ district
+                  + s(construction.date, by=district, k=k_constr, bs="ps"),
+                  data=WarsawApts)
+
+#Mod 2 avec surf et construction
+mod2_b <- gam(areaPerMzloty~ district
+                  + s(construction.date, by=district, k=k_constr, bs="ps")+
+              s(surface, k=k_surface, bs="ps"),
+                  data=WarsawApts)
+
+# Modèle 3 : modèle avec surface et floor
+mod3_b <- gam(areaPerMzloty ~ district + 
+              s(construction.date, by = district, k=k_constr, bs="ps") +
+              s(surface, k=k_surface, bs="ps") +
+              s(floor, k=k_floor, bs="ps"),
+            data = WarsawApts)
+
+# Modèle 4 : modèle complet (avec surface et floor et n.rooms)
+mod4_b <- gam(areaPerMzloty ~ district + 
+              s(construction.date, by = district, k=k_constr, bs="ps") +
+              s(surface, k=k_surface, bs="ps") +
+              s(n.rooms, k=length(unique(WarsawApts$n.rooms)), bs="ps"),
+            
+            data = WarsawApts)
+
+
+AIC(mod1_b, mod2_b, mod3_b, mod4_b)
+```
+
+Le modèle 1 obtient l'AIC la plus haute, tandis que le modèle 2, 3 et 4
+présentent des AIC très proche.
+
+Afin de déterminer statistiquement si l'ajout des variables améliore
+significativement l'ajustement, nous avons réalisé des test ANOVA entre
+nos modèles emboîtés.
+
+On compare :
+
+$H_0 : \text{Le modèle réduit est suffisant}$
+
+$H_1 : \text{Le modèle complet apporte une amélioration significative}$
+
+```{r, echo=FALSE}
+
+anova(mod1_b, mod2_b, test="F")
+
+anova(mod2_b, mod3_b, test = "F")
+
+anova(mod2_b, mod4_b, test="F")
+
+```
+
+##### Modèle 1 vs modèle 2 :
+
+Le test nous indique une p-value de 1.58e-08 \<0.05 , donc on peut
+conclure que l'ajout de la surface améliore très significativement le
+modèle. On va donc garder le modèle 2 avec la variable surface.
+
+##### Modèle 2 vs modèle 3 :
+
+Le test nous indique une p-value de 0.1837 \> 0.05 , donc on peut
+conclure que l'ajout de l'étage n'améliore pas significativement le
+modèle et n'apporte donc pas d'information supplémentaire. On garde donc
+le modèle 2.
+
+##### Modèle 2 vs modèle 4 :
+
+Le test nous indique une p-value de 0.053 \> 0.05 , donc on peut
+conclure que l'ajout du nombre de pièce n'améliore pas significativement
+malgré que la p-value soit proche du seuil.
+
+##### Choix du modèle final
+
+En se basant sur les résultats de l'AIC et des tests ANOVA, on choisit
+donc de retenir le modèle 2 comme le modèle final optimal.
+
+Notre modèle est donc : $$
+\text{areaPerMzloty}_i
+= \beta_0
++ \sum_{j=1}^{3} \beta_j\,\mathbf{1}_{\{d_i=j\}}
++ \sum_{j=0}^{3} f_j(c_i)\,\mathbf{1}_{\{d_i=j\}}
++ g(s_i)
++ \varepsilon_i
+$$
+
+$$
+\text{areaPerMzloty}_i =
+\begin{cases}
+\beta_0 + f_0(\text{construction.date}_i) + g(\text{surface}_i) + \varepsilon_i, & \text{si Mokotow},\\[6pt]
+\beta_0 + \beta_1 + f_1(\text{construction.date}_i) + g(\text{surface}_i) + \varepsilon_i, & \text{si Srodmiescie},\\[6pt]
+\beta_0 + \beta_2 + f_2(\text{construction.date}_i) + g(\text{surface}_i) + \varepsilon_i, & \text{si Wola},\\[6pt]
+\beta_0 + \beta_3 + f_3(\text{construction.date}_i) + g(\text{surface}_i) + \varepsilon_i, & \text{si Zoliborz}.
+\end{cases}
+$$
+
+-   $\beta_0$ ​ = intercept de référence (pour Mokotow).
+
+<!-- -->
+
+-   $\beta_j$​ = effet fixe du quartier j.
+
+<!-- -->
+
+-   $f_j$ = **fonction lisse spécifique au quartier** j pour l'effet de
+    l'année de construction (interaction).
+
+<!-- -->
+
+-   g = **fonction lisse globale** pour l'effet de la surface (identique
+    pour tous les quartiers).
+
+```{r, echo=FALSE}
+
+#Vérification des hypothèses avec résidus
+par(mfrow = c(2, 2))
+gam.check(mod2_b)
+par(mfrow = c(1, 1))
+
+```
+
+#### Validation du modèle :
+
+-   Le QQ-plot indique que les résidus suivent approximativement une
+    distribution normale.
+
+-   On n'observe aucun pattern systématique, ce qui confirme
+    l'homoscédasticité.
+
+-   L'histogramme des résidus montre une distribution plutôt symétrique
+    centrée sur zéro.
+
+```{r, warning=FALSE, message=FALSE}
+# Créer une grille de prédiction
+date_grid <- expand.grid(
+  construction.date = seq(min(WarsawApts$construction.date),
+                          max(WarsawApts$construction.date),
+                          length.out = 100),
+  district = levels(WarsawApts$district),
+  surface = median(WarsawApts$surface)
+)
+
+# Prédictions
+date_pred <- predict(mod2_b, 
+                     newdata = date_grid, 
+                     type = "response",
+                     se.fit = TRUE)
+
+date_plot_data <- date_grid %>%
+  mutate(
+    pred = date_pred$fit,
+    se = date_pred$se.fit,
+    lower = pred - 1.96 * se,
+    upper = pred + 1.96 * se
+  )
+
+ggplot(date_plot_data, aes(x = construction.date, y = pred, color = district)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = district),
+              alpha = 0.2, color = NA) +
+  labs(title = "Prix au m² en fonction de l'année de construction (à surface fixée)",
+       subtitle = "Par district (avec intervalles de confiance à 95%)",
+       x = "Année de construction",
+       y = "Prix prédit au m² (areaPerMzloty)",
+       color = "District",
+       fill = "District") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "bottom")
+
+```
+
+Ce projet nous a permis d'explorer différentes approches de modélisation
+non paramétrique pour prédire le prix au m² des appartements.
+
+Après avoir enrichi progressivement nos modèles en intégrant d'autres
+variables explicatives (surface, étage, nombre de pièces), le modèle
+finale sélectionné est le deuxième modèle de la partie variables
+qualitatives et quantitatives, il présente le plus petit AIC parmi tous
+les modèles traités dans ce projet. C'est un modèle qui contient une
+interaction entre le district et l'année de construction ainsi qu'un
+effet global de la surface. On utilise une base "ps" pour le paramètre
+"bs" qui est la base de polynômes tronqués avec une pénalité sur la
+différence.
