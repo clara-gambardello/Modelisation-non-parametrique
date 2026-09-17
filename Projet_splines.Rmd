@@ -1,6 +1,6 @@
 ---
 title: "Modélisation non paramétrique par des fonctions B-spline"
-author: "Cindy Lançon, Clara Gambardello, Karla Pem"
+author: "Clara Gambardello"
 date: "2025-11-27"
 output:
   pdf_document: default
