@@ -1,0 +1,1 @@
+# Mod-lisation_non_param-trique_par_des_fonctions_B-spline
